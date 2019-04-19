@@ -1,0 +1,393 @@
+---
+title: "Ona Data Analysis"
+author: "Chris H. Wilson"
+date: "March 6, 2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(rstanarm)
+options(mc.cores = parallel::detectCores())
+#rstan_options(auto_write = TRUE)
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+
+
+
+
+
+```
+
+First task is to read in data, recode treatment to correct indicator values, and then assemble everything into a list, preparation for use in running Stan models.  
+```{r data for rstanarm and plotting, echo = FALSE}
+
+dat_lmer <- read.csv("Ona_Data_ALL.csv")
+
+
+```
+
+
+Collecting useful functions. 
+
+```{r miscellaneous functions, echo = FALSE}
+## Useful functions 
+
+names_rstanarm <- function(stan_object){
+  draws_df <- as.data.frame(stan_object)
+  names <- colnames(draws_df)
+  return(names)
+}
+
+
+PPlot_COEF <- function(stan_object, par_select,new_par_names,title_string) {
+require(ggplot2)
+draws_df <- as.data.frame(stan_object)
+draws_list <- lapply(draws_df, quantile, probs = c(0.025,0.25,0.5,0.75,0.975))
+
+lows95 <- rep(0,length(draws_list))
+lows50 <- rep(0,length(draws_list))
+his95 <- rep(0,length(draws_list))
+his50 <- rep(0,length(draws_list))
+meds <- rep(0, length(draws_list))
+params <- rep(NA,length(draws_list))
+
+for(i in 1:length(draws_list)){
+params[i] <- paste(colnames(draws_df[i]))
+lows95[i] <- draws_list[[i]][1] 
+lows50[i] <- draws_list[[i]][2]
+meds[i] <- draws_list[[i]][3]
+his50[i] <- draws_list[[i]][4]
+his95[i] <- draws_list[[i]][5]
+}
+
+plot_df <- data.frame(par = as.factor(params), lo95 = lows95, lo50 = lows50, med = meds, hi50 = his50, hi95 = his95)
+
+plot_df_real <- plot_df[which(plot_df$par%in%par_select),]
+plot_df_real$pars <- factor(plot_df_real$par, levels = par_select)
+levels(plot_df_real$pars) <- new_par_names
+
+coef_plot <- ggplot(plot_df_real, aes(x = pars)) + geom_point(aes(y=med),size = 1.5) + geom_segment(aes(xend = pars, y = lo95, yend = hi95)) + geom_segment(aes(xend=pars,y=lo50,yend=hi50),size = 1.1) + geom_hline(aes(yintercept = 0),linetype = "dashed") + coord_flip() + ylab("Estimates") + xlab("") + scale_x_discrete(limits = rev(levels(plot_df_real$pars))) + ggtitle(paste(title_string)) + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))
+
+print(coef_plot)
+return(coef_plot)
+}
+
+### Next function: pairwise plotting of random effect level differences 
+# 
+pairwise_function <- function(stan_model, par_select, new_par_names){
+  
+draw_df2 <- as.data.frame(stan_model)
+N = ncol(draw_df2)
+M = nrow(draw_df2)
+
+diff_array <- array(0, dim = c(M,N,N))
+
+for(i in 1:N){
+  for(j in 1:N){
+  diff_array[,j,i] <- draw_df2[,i] - draw_df2[,j] 
+  }
+}
+
+nums2select <- which(colnames(draw_df2) %in% par_select)
+
+out_array <- diff_array[,nums2select,nums2select]
+dimnames(out_array)[[2]] <- new_par_names
+dimnames(out_array)[[3]] <- new_par_names 
+
+med_diff <- apply(out_array, c(2,3),median)
+se_diff <- apply(out_array, c(2,3),sd)
+low95_diff <- apply(out_array, c(2,3),quantile, probs = c(0.025))
+hi95_diff <- apply(out_array,c(2,3),quantile, probs = c(0.975))
+low50_diff <- apply(out_array, c(2,3),quantile, probs = c(0.25))
+hi50_diff <- apply(out_array,c(2,3),quantile, probs = c(0.75))
+
+
+
+diff_names <- matrix(0,nrow(med_diff),ncol(med_diff))
+
+for(i in 1:nrow(med_diff)){
+  for(j in 1:ncol(med_diff)){
+    diff_names[i,j] <- paste0(paste(rownames(med_diff)[j]), paste("-"), paste(colnames(med_diff)[i]))
+  }
+}
+
+diff_names2 <- diff_names[upper.tri(med_diff)]
+med_diffs <- med_diff[upper.tri(med_diff)]
+low95_diffs <- low95_diff[upper.tri(low95_diff)]
+hi95_diffs <- hi95_diff[upper.tri(hi95_diff)]
+low50_diffs <- low50_diff[upper.tri(low50_diff)]
+hi50_diffs <- hi50_diff[upper.tri(hi50_diff)]
+
+
+diff_df <- data.frame(par_diff = as.factor(diff_names2),med_diffs = med_diffs, lo95 = low95_diffs, hi95 = hi95_diffs,
+                      lo50 = low50_diffs, hi50 = hi50_diffs)
+
+coef_plot <- ggplot(diff_df, aes(x = par_diff)) + geom_point(aes(y=med_diffs),size = 1.5) + geom_segment(aes(xend = par_diff, y = lo95, yend = hi95)) + 
+  geom_segment(aes(xend=par_diff,y=lo50,yend=hi50),size = 1.1) + 
+  geom_hline(aes(yintercept = 0),linetype = "dashed") + coord_flip() + ylab("Estimates") + xlab("")
+  
+print(coef_plot)
+return(list(coef_plot,post_med = med_diff, post_se = se_diff))
+
+}
+```
+
+
+Making and saving Figure 1
+
+```{r Figure 1, echo = FALSE}
+
+dat4plot <- dat_lmer %>% select(abovemass, rootmass, Cults, Freq, Resid)
+
+
+levels(dat4plot$Cults)
+#print(dat4plot %>% group_by(Cults) %>% summarize(mr = mean(rootmass)))
+
+dat4plot <- gather(dat4plot, key = "Type",value = "Mass", abovemass, rootmass)
+#str(dat4plot)
+dat4plot$type <- as.factor(dat4plot$Type)
+levels(dat4plot$type) <- c("Shoots", "Roots")
+
+dat4plotSumm <- dat4plot %>% group_by(Cults,Freq,Resid,type) %>% summarize(mMass = mean(Mass), seMass = sd(Mass)/n(), lower = mMass - seMass, upper = mMass + seMass)
+
+facetSettings <-
+  theme(panel.grid.major = element_line("lightgray",0.5),
+        panel.grid.minor = element_line("lightgray",0.25));
+
+facetSettings <- 
+  theme(axis.line=element_line(colour="black"),
+        panel.border=element_rect(linetype="solid",color="black",fill=NA,size=0.7),
+        strip.background = element_rect(colour = "black", fill = "grey"));
+
+
+Fig1c <- ggplot() + geom_errorbar(data = dat4plotSumm, aes(x=Cults,ymin=lower,ymax = upper, color = type),position = position_dodge(width = 0.5), width = 0.2, size = 0.8, alpha = 0.9) +
+  geom_point(data = dat4plotSumm, aes(x=Cults,y = mMass, color = type, shape = type),position = position_dodge(width = 0.5),
+             size = 1.2) + 
+  scale_color_manual(values = c("#009E73",  "#D55E00")) + 
+  geom_point(data = dat4plot, aes(x=Cults,y=Mass,shape = type),position = position_dodge(width=0.5), alpha = 0.4, size = 1) +
+#  geom_hline(aes(yintercept = 0)) + 
+  facet_grid(Freq~Resid, scales = "free") +
+    scale_y_continuous(breaks = seq(0,500,100),limits = c(50,500)) + 
+    xlab("Cultivar") + ylab(bquote('Mass ('*gm^-2*')')) + facetSettings; 
+
+print(Fig1c);
+
+save_plot("Fig1.pdf",Fig1c, base_aspect_ratio = 1.7);
+
+```
+
+Setting up and running gamma GLMMs in rstanarm 
+
+```{r stanarm models, echo = FALSE}
+
+#mean(dat_lmer$rootmass) 225
+#mean(dat_lmer$abovemass) 290
+
+# Data summary: 
+#dat_lmer %>% group_by(freq_effect, resid_effect) %>% summarize(mShoot = mean(abovemass), mRoot = mean(rootmass))
+
+## Roots 
+# Log Link
+stanglmer_root1 <- stan_glmer(rootmass/225 ~ freq_effect*resid_effect + (1 + freq_effect*resid_effect|Cults) + (1|Plots), family = Gamma(link=log), prior_intercept = normal(0,1), prior = normal(0,0.5), data = dat_lmer, adapt_delta = 0.99)
+
+print(stanglmer_root1, digits = 2)
+
+#plot(fitted(stanglmer_root1),resid(stanglmer_root1))
+
+save(stanglmer_root1, file = "GammaLog_Root_Rstanarm.RData")
+
+
+## Shoots
+# Log Link 
+stanglmer_shoot1 <- stan_glmer(abovemass/290 ~ freq_effect*resid_effect + (1 + freq_effect*resid_effect|Cults) + (1|Plots), family = Gamma(link=log), prior_intercept = normal(0,1), prior = normal(0,1), dat_lmer, adapt_delta = 0.99)
+
+print(stanglmer_shoot1, digits = 2)
+save(stanglmer_shoot1, file = "GammaLog_Shoot_Rstanarm.RData")
+
+## Ratio 
+# Log Link 
+stanglmer_ratio <- stan_glmer(rootmass/(abovemass+rootmass) ~ freq_effect*resid_effect + (1 + freq_effect*resid_effect|Cults) + (1|Plots), family = Gamma(link = log), prior_intercept = normal(0,1), prior = normal(0,0.5), dat_lmer, adapt_delta = 0.99)
+
+print(stanglmer_ratio, digits = 2)
+#plot(fitted(stanglmer_ratio),resid(stanglmer_ratio))
+
+save(stanglmer_ratio, file = "GammaLog_BelowFrac_Rstanarm.RData")
+
+
+```
+
+
+Making plots to represent things
+
+```{r plotting inferences, echo = FALSE}
+
+#names_rstanarm(stanglmer_shoot1)
+load(file = "GammaLog_Root_Rstanarm.RData")
+load(file = "GammaLog_Shoot_Rstanarm.RData")
+load(file = "GammaLog_BelowFrac_Rstanarm.RData")
+### Fixed Effects
+
+print(stanglmer_root1, digits = 3)
+print(stanglmer_ratio, digits = 3)
+
+
+par_select <- c("(Intercept)","freq_effect","resid_effect","freq_effect:resid_effect")
+new_par_names <- c("Intercept","Freq","Resid","Freq:Resid")
+
+# Uses function defined below 
+shoot_title <- "Shoots"
+shoot_coef <- PPlot_COEF(stanglmer_shoot1,par_select,new_par_names,shoot_title)
+
+root_title <- "Roots"
+root_coef <- PPlot_COEF(stanglmer_root1,par_select,new_par_names, root_title)
+
+allocate_title <- "Root Allocation"
+frac_coef <- PPlot_COEF(stanglmer_ratio,par_select,new_par_names, allocate_title)
+
+fixef_coefplot <- plot_grid(shoot_coef,root_coef,frac_coef, nrow = 1)
+print(fixef_coefplot)
+save_plot("fixef_coef.pdf",fixef_coefplot,base_aspect_ratio = 2.5)
+
+### Random Effects 
+
+# Overall cultivar means 
+
+par_select2 <- c("b[(Intercept) Cults:A]","b[(Intercept) Cults:P]","b[(Intercept) Cults:UF-R]","b[(Intercept) Cults:T9]") 
+new_par_names2 <- c("Argentine","Pensacola","UF-Riata","Tifton-9")
+
+
+par_select2b <- c("b[freq_effect Cults:A]","b[freq_effect Cults:P]","b[freq_effect Cults:UF-R]","b[freq_effect Cults:T9]") 
+new_par_names2b <- c("Argentine","Pensacola","UF-Riata","Tifton-9")
+
+par_select2c <- c("b[resid_effect Cults:A]","b[resid_effect Cults:P]","b[resid_effect Cults:UF-R]","b[resid_effect Cults:T9]") 
+new_par_names2c <- c("Argentine","Pensacola","UF-Riata","Tifton-9")
+
+par_select2d <- c("b[freq_effect:resid_effect Cults:A]","b[freq_effect:resid_effect Cults:P]","b[freq_effect:resid_effect Cults:UF-R]","b[freq_effect:resid_effect Cults:T9]") 
+new_par_names2d <- c("Argentine","Pensacola","UF-Riata","Tifton-9")
+
+
+#colnames(as.data.frame(stanglmer_shoot1))
+#which(colnames(as.data.frame(stanglmer_shoot1))%in%par_select2)
+
+shoot_coef_ranef <- PPlot_COEF(stanglmer_shoot1,par_select2,new_par_names2,shoot_title)
+root_coef_ranef <- PPlot_COEF(stanglmer_root1,par_select2,new_par_names2,root_title)
+frac_coef_ranef <- PPlot_COEF(stanglmer_ratio,par_select2,new_par_names2,allocate_title)
+
+
+shoot_coef_ranef2 <- PPlot_COEF(stanglmer_shoot1,par_select2b,new_par_names2b,"")
+root_coef_ranef2 <- PPlot_COEF(stanglmer_root1,par_select2b,new_par_names2b,"")
+frac_coef_ranef2 <- PPlot_COEF(stanglmer_ratio,par_select2b,new_par_names2b,"")
+
+
+shoot_coef_ranef3 <- PPlot_COEF(stanglmer_shoot1,par_select2c,new_par_names2c,"")
+root_coef_ranef3 <- PPlot_COEF(stanglmer_root1,par_select2c,new_par_names2c,"")
+frac_coef_ranef3 <- PPlot_COEF(stanglmer_ratio,par_select2c,new_par_names2c,"")
+
+
+shoot_coef_ranef4 <- PPlot_COEF(stanglmer_shoot1,par_select2d,new_par_names2d,"")
+root_coef_ranef4 <- PPlot_COEF(stanglmer_root1,par_select2d,new_par_names2d,"")
+frac_coef_ranef4 <- PPlot_COEF(stanglmer_ratio,par_select2d,new_par_names2d,"")
+
+
+ranef_coefplot <- plot_grid(shoot_coef_ranef, root_coef_ranef,frac_coef_ranef,
+                            shoot_coef_ranef2, root_coef_ranef2,frac_coef_ranef2,shoot_coef_ranef3, root_coef_ranef3,frac_coef_ranef3,shoot_coef_ranef4, root_coef_ranef4,frac_coef_ranef4,nrow = 4, ncol = 3, label_size = 12)
+
+
+print(ranef_coefplot)
+save_plot("ranef_coef_full.pdf",ranef_coefplot,ncol = 3,
+          nrow = 4, base_aspect_ratio = 1.2)
+
+
+## Pairwise differences 
+
+par_select <- c("b[(Intercept) Cults:A]","b[(Intercept) Cults:P]",
+                "b[(Intercept) Cults:T9]","b[(Intercept) Cults:UF-R]")
+new_par_names <- c("Argentine","Pensacola","Tifton-9","UF-Riata")
+
+# Intercepts/grand means 
+root_pairwise <- pairwise_function(stanglmer_root1, par_select, new_par_names)[[1]] + ggtitle("Pairwise Differences")
+print(root_pairwise)
+
+#pairwise_inf <- pairwise_function(stanglmer_root1, par_select, new_par_names)[[2]]
+#print(pairwise_inf)
+
+
+save_plot("Pairwise_Diff.pdf", root_pairwise)
+
+
+```
+
+
+Can we use an aboveground proxy (shoot production) to predict root production? 
+
+```{r above below analysis}
+
+# Don't need to re-run 
+stanglmer_AboveBelow <- stan_glmer(rootmass ~ abovemass + (1|Plots), family = Gamma, prior_intercept = normal(0,1), prior = normal(0,0.5), data = dat_lmer, adapt_delta = 0.99)
+print(stanglmer_AboveBelow, digits = 5)
+preds <- posterior_predict(stanglmer_AboveBelow)
+preds2 <- apply(preds,2,mean) # mean of posterior predictions 
+dat_lmer$preds <- preds2
+
+save(stanglmer_AboveBelow, file = "RootPreds_AboveProxy.RData")
+
+stanglmer_AboveBelow2 <- stan_glmer(rootmass ~ abovemass + freq_effect*resid_effect + (1 + freq_effect*resid_effect|Cults) + (1|Plots), family = Gamma, prior_intercept = normal(0,1), prior = normal(0,0.5), data = dat_lmer, adapt_delta = 0.99)
+print(stanglmer_AboveBelow2, digits = 5)
+predsF <- posterior_predict(stanglmer_AboveBelow2)
+predsF2 <- apply(predsF,2,mean) # mean of posterior predictions 
+
+dat_lmer$predsF <- predsF2
+
+save(stanglmer_AboveBelow2, file = "RootPreds_AboveProxyTreat.RData")
+
+load(file = "RootPreds_AboveProxy.RData")
+load(file = "RootPreds_AboveProxyTreat.RData")
+
+dat_lmer$preds <- preds2
+
+
+## Predicted vs Observed Plots  
+
+PvO_1 <- ggplot(dat_lmer, aes(x=rootmass,y=preds)) + geom_point() + geom_abline(aes(intercept = 0, slope = 1)) + ylab("Predicted") + xlab("Observed") + ggtitle("Aboveground Proxy") + scale_y_continuous(limits = c(50,550),breaks = seq(100,500,100))
+
+
+PvO_2 <- ggplot(dat_lmer, aes(x=rootmass,y=predsF)) + geom_point() + geom_abline(aes(intercept = 0, slope = 1)) + ylab("Predicted") + xlab("Observed") + ggtitle("Aboveground Proxy + Treatment") + scale_y_continuous(limits = c(50,550),breaks = seq(100,500,100))
+
+#print(PvO_2)
+predict_compare <- plot_grid(PvO_1, PvO_2)
+print(predict_compare)
+
+save_plot("Predict_Compare.pdf", predict_compare, ncol = 2)
+
+### R_squared computations 
+
+# With just aboveground production
+median(bayes_R2(stanglmer_AboveBelow, re.form = NA)) # 0.09
+
+# With aboveground production and plot
+median(bayes_R2(stanglmer_AboveBelow)) # 0.18 
+
+# With aboveground production and treatment, no cultivar
+median(bayes_R2(stanglmer_AboveBelow2, re.form = NA)) # 0.21 
+
+# With everything 
+median(bayes_R2(stanglmer_AboveBelow2)) # 0.45 
+
+
+# Visual stratification by treatment 
+ggplot(dat_lmer, aes(x=rootmass,y=preds, color = interaction(Freq,Resid))) + geom_point() + geom_abline(aes(intercept = 0, slope = 1)) + ylab("Predicted") + xlab("Observed") + ggtitle("Aboveground Proxy") + scale_y_continuous(limits = c(50,550),breaks = seq(100,500,100))
+
+
+
+```
+
+
+
