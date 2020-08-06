@@ -35,6 +35,34 @@ dat_lmer <- read.csv("Ona_Data_ALL.csv")
 ```
 
 
+Running canonical ANOVA 
+
+```{r}
+library(lme4)
+str(dat_lmer)
+m1 <- lmer(rootmass ~ Freq*Resid*Cults + (1|Plots),dat_lmer)
+summary(m1)
+
+install.packages("lmerTest")
+library(lmerTest)
+anova(m1)
+
+str(dat_lmer)
+dat_lmer$Plots <- as.factor(dat_lmer$Plots)
+
+m2 <- aov(rootmass ~ Freq*Resid*Cults + Error(Plots),
+          data = dat_lmer)
+
+summary(m2)
+
+
+
+
+```
+
+
+
+
 Collecting useful functions. 
 
 ```{r miscellaneous functions, echo = FALSE}
