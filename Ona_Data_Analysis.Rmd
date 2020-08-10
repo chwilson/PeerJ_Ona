@@ -39,9 +39,9 @@ Running canonical ANOVA
 
 ```{r}
 library(lme4)
-str(dat_lmer)
+#str(dat_lmer)
 m1 <- lmer(rootmass ~ Freq*Resid*Cults + (1|Plots),dat_lmer)
-summary(m1)
+#summary(m1)
 
 install.packages("lmerTest")
 library(lmerTest)
